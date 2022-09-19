@@ -1,14 +1,35 @@
 from homeassistant.components import input_boolean, light
-from homeassistant.core import EVENT_HOMEASSISTANT_START, HomeAssistant
+from homeassistant.config_entries import ConfigEntryState
+from homeassistant.const import CONF_ENTITY_ID, CONF_NAME, CONF_UNIQUE_ID
+from homeassistant.core import HomeAssistant
+from homeassistant.helpers.device_registry import DeviceEntry
+from homeassistant.helpers.entity_registry import (
+    EntityRegistry,
+    RegistryEntry,
+    RegistryEntryDisabler,
+)
 from homeassistant.setup import async_setup_component
+from pytest_homeassistant_custom_component.common import (
+    MockConfigEntry,
+    mock_device_registry,
+    mock_registry,
+)
 
 from custom_components.powercalc import create_domain_groups
 from custom_components.powercalc.const import (
     ATTR_ENTITIES,
     CONF_CREATE_DOMAIN_GROUPS,
+    CONF_CREATE_UTILITY_METERS,
     CONF_ENABLE_AUTODISCOVERY,
+    CONF_FIXED,
+    CONF_MANUFACTURER,
+    CONF_POWER,
+    CONF_SENSOR_TYPE,
+    CONF_UTILITY_METER_TYPES,
     DOMAIN,
     DOMAIN_CONFIG,
+    DUMMY_ENTITY_ID,
+    SensorType,
 )
 from custom_components.test.light import MockLight
 
@@ -60,7 +81,75 @@ async def test_autodiscovery_disabled(hass: HomeAssistant):
     assert not hass.states.get("sensor.testa_power")
 
 
-async def test_domain_groups(hass: HomeAssistant):
+async def test_manual_configured_light_overrides_autodiscovered(hass: HomeAssistant):
+    light_entity = MockLight("testing")
+    light_entity.manufacturer = "signify"
+    light_entity.model = "LCA001"
+    await create_mock_light_entity(hass, light_entity)
+
+    await run_powercalc_setup_yaml_config(
+        hass, {CONF_ENTITY_ID: "light.testing", CONF_FIXED: {CONF_POWER: 25}}, {}
+    )
+
+    state = hass.states.get("sensor.testing_power")
+    assert state
+    assert state.state == "25.00"
+
+
+async def test_autodiscover_skips_disabled_entities(hass: HomeAssistant):
+    mock_registry(
+        hass,
+        {
+            "light.test": RegistryEntry(
+                entity_id="light.test",
+                unique_id="1234",
+                platform="light",
+                device_id="some-device-id",
+                disabled_by=RegistryEntryDisabler.HASS,
+            ),
+        },
+    )
+    mock_device_registry(
+        hass,
+        {
+            "light.test": DeviceEntry(
+                id="some-device-id", manufacturer="signify", model="LCT010"
+            )
+        },
+    )
+    await async_setup_component(hass, DOMAIN, {})
+    await hass.async_block_till_done()
+
+    assert not hass.states.get("sensor.test_power")
+
+
+async def test_autodiscover_skips_entities_with_empty_manufacturer(hass: HomeAssistant):
+    mock_registry(
+        hass,
+        {
+            "light.test": RegistryEntry(
+                entity_id="light.test",
+                unique_id="1234",
+                platform="light",
+                device_id="some-device-id",
+            ),
+        },
+    )
+    mock_device_registry(
+        hass,
+        {
+            "light.test": DeviceEntry(
+                id="some-device-id", manufacturer="", model="LCT010"
+            )
+        },
+    )
+    await async_setup_component(hass, DOMAIN, {})
+    await hass.async_block_till_done()
+
+    assert not hass.states.get("sensor.test_power")
+
+
+async def test_domain_groups(hass: HomeAssistant, entity_reg: EntityRegistry):
     await create_input_boolean(hass)
 
     domain_config = {
@@ -90,3 +179,61 @@ async def test_domain_groups(hass: HomeAssistant):
     assert group_state.attributes.get(ATTR_ENTITIES) == {"sensor.test_power"}
 
     assert not hass.states.get("sensor.all_light_power")
+
+    entity_entry = entity_reg.async_get("sensor.all_input_boolean_power")
+    assert entity_entry
+    assert entity_entry.platform == "powercalc"
+
+
+async def test_unload_entry(hass: HomeAssistant, entity_reg: EntityRegistry):
+    unique_id = "98493943242"
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        data={
+            CONF_SENSOR_TYPE: SensorType.VIRTUAL_POWER,
+            CONF_UNIQUE_ID: unique_id,
+            CONF_NAME: "testentry",
+            CONF_ENTITY_ID: DUMMY_ENTITY_ID,
+            CONF_FIXED: {CONF_POWER: 50},
+        },
+        unique_id=unique_id,
+    )
+    entry.add_to_hass(hass)
+
+    await hass.config_entries.async_setup(entry.entry_id)
+    await hass.async_block_till_done()
+
+    assert hass.states.get("sensor.testentry_power")
+    assert entity_reg.async_get("sensor.testentry_power")
+
+    await hass.config_entries.async_unload(entry.entry_id)
+    await hass.async_block_till_done()
+    assert entry.state is ConfigEntryState.NOT_LOADED
+
+
+async def test_domain_light_group_with_autodiscovery_enabled(hass: HomeAssistant):
+    """
+    See https://github.com/bramstroker/homeassistant-powercalc/issues/939
+    """
+    light_entity = MockLight("testb")
+    light_entity.manufacturer = "signify"
+    light_entity.model = "LCA001"
+
+    await create_mock_light_entity(hass, light_entity)
+
+    domain_config = {
+        CONF_ENABLE_AUTODISCOVERY: True,
+        CONF_CREATE_DOMAIN_GROUPS: [light.DOMAIN],
+        CONF_CREATE_UTILITY_METERS: True,
+        CONF_UTILITY_METER_TYPES: ["daily"],
+    }
+
+    await run_powercalc_setup_yaml_config(hass, {}, domain_config)
+
+    await create_domain_groups(hass, hass.data[DOMAIN][DOMAIN_CONFIG], [light.DOMAIN])
+    await hass.async_block_till_done()
+
+    assert hass.states.get("sensor.all_light_power")
+    assert hass.states.get("sensor.all_light_energy")
+    assert not hass.states.get("sensor.all_light_energy_2")
+    assert hass.states.get("sensor.all_light_energy_daily")

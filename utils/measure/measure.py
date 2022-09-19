@@ -119,7 +119,10 @@ SLEEP_TIME_SAMPLE = config("SLEEP_TIME_SAMPLE", default=1, cast=int)
 SLEEP_TIME_HUE = config("SLEEP_TIME_HUE", default=5, cast=int)
 SLEEP_TIME_SAT = config("SLEEP_TIME_SAT", default=10, cast=int)
 SLEEP_TIME_CT = config("SLEEP_TIME_CT", default=10, cast=int)
+SLEEP_TIME_NUDGE = config("SLEEP_TIME_NUDGE", default=10, cast=float)
+PULSE_TIME_NUDGE = config("PULSE_TIME_NUDGE", default=2, cast=float)
 MAX_RETRIES = config("MAX_RETRIES", default=5, cast=int)
+MAX_NUDGES = config("MAX_NUDGES", default=0, cast=int)
 SAMPLE_COUNT = config("SAMPLE_COUNT", default=1, cast=int)
 
 SHELLY_IP = config("SHELLY_IP")
@@ -162,13 +165,75 @@ with open(os.path.join(sys.path[0], ".VERSION"), "r") as f:
     _VERSION = f.read().strip()
 
 class Measure:
-    def __init__(self, light_controller: LightController, power_meter: PowerMeter):
+    """Measure the power usage of a light.
+
+    This class is responsible for measuring the power usage of a light. It uses a LightController to control the light, and a PowerMeter
+    to measure the power usage. The measurements are exported as CSV files in export/<model_id>/<color_mode>.csv (or .csv.gz). The
+    model_id is retrieved from the LightController and color mode can be selected by user input or config file (.env). The CSV files
+    contain one row per variation, where each column represents one property of that variation (e.g., brightness, hue, saturation). The last
+    column contains the measured power value in watt.
+    If you want to generate model JSON files for the LUT model, you can do so by answering yes to the question "Do you want to generate
+    model.json?".
+
+    Example
+    -------
+    
+    >>> from light_controller import LightController
+    >>> from power_meter import PowerMeter
+
+    >>> light_controller = LightController()
+    >>> power_meter = PowerMeter()
+
+    >>> measure = Measure(light_controller, power_meter)
+    >>> measure.start()
+
+    # CSV file export/<model-id>/hs.csv will be created with measurements for HS
+    color mode (e.g., hue and saturation). The last column contains the measured
+    power value in watt.
+
+    # If you answered yes to generating a model JSON file, a model.json will be
+    created in export/<model-id>
+    
+    """
+
+    def __init__(self, light_controller: LightController, power_meter: PowerMeter) -> None:
+        """This class measures the power consumption of the light bulb.
+
+        Parameters
+        ----------
+        light_controller : LightController
+            The light controller to use.
+        power_meter : PowerMeter
+            The power meter to use.
+        """
         self.light_controller = light_controller
         self.power_meter = power_meter
         self.num_0_readings: int = 0
 
-    def start(self):
-        """Starts the measurement session"""
+    def start(self) -> None:
+        """Starts the measurement session.
+
+        This method asks the user for the required information, sets up the light controller and power meter and starts the measurement
+        session.
+
+        Raises
+        ------
+        PowerMeterError
+            If the power meter is not connected.
+
+        ZeroReadingError
+            If the power meter returns a 0 reading.
+
+        Notes
+        -----
+        This method is the main entry point for the measurement
+        session.
+
+        Examples
+        --------
+        >>> measure = Measure()
+        >>> measure.start()
+        """
         answers = self.ask_questions()
         self.light_controller.process_answers(answers)
         self.power_meter.process_answers(answers)
@@ -256,6 +321,8 @@ class Measure:
                 time.sleep(SLEEP_TIME)
                 try:
                     power = self.take_power_measurement(variation_start_time)
+                except OutdatedMeasurementError as error:
+                    self.nudge_and_remeasure(self.color_mode, variation)
                 except ZeroReadingError as error:
                     self.num_0_readings += 1
                     _LOGGER.warning(f"Discarding measurement: {error}")
@@ -274,9 +341,60 @@ class Measure:
 
         if bool(answers.get("gzip", True)):
             self.gzip_csv(csv_file_path)
+    def nudge_and_remeasure(self, color_mode: str, variation: Variation):
+        for nudge_count in range(MAX_NUDGES):
+            try:
+                # Likely not significant enough change for PM to detect. Try nudging it
+                _LOGGER.warning("Measurement is stuck, Nudging")
+                # If brightness is low, set brightness high. Else, turn light off
+                self.light_controller.change_light_state(MODE_BRIGHTNESS, on=(variation.bri < 128), bri=255)
+                time.sleep(PULSE_TIME_NUDGE)
+                variation_start_time = time.time()
+                self.light_controller.change_light_state(
+                    color_mode, on=True, **asdict(variation)
+                )
+                # Wait a longer amount of time for the PM to settle
+                time.sleep(SLEEP_TIME_NUDGE)
+                power = self.take_power_measurement(variation_start_time)
+                return power
+            except OutdatedMeasurementError:
+                continue
+            except ZeroReadingError as error:
+                self.num_0_readings += 1
+                _LOGGER.warning(f"Discarding measurement: {error}")
+                if self.num_0_readings > MAX_ALLOWED_0_READINGS:
+                    _LOGGER.error("Aborting measurement session. Received too many 0 readings")
+                    return
+                continue
+        raise OutdatedMeasurementError(f"Power measurement is outdated. Aborting after {nudge_count + 1} nudged retries")
 
     def should_resume(self, csv_file_path: str) -> bool:
-        """Check whether we are able to resume a previous measurement session"""
+        """This method checks if a CSV file already exists for the current color mode.
+        
+        If so, it asks the user if he wants to resume measurements or start over.
+
+        Parameters
+        ----------
+        csv_file_path : str
+            The path of the CSV file that should be checked
+
+        Returns
+        -------
+        bool
+            True if we should resume measurements, False otherwise.
+
+        Raises
+        ------
+        Exception
+            When something goes wrong with reading/writing files.
+
+        UndefinedValueError
+            When no value is defined in .env for RESUME key.
+
+        ValueError
+            When an invalid value is defined in .env for RESUME key (not 'true' or 'false').
+
+        """
         if not os.path.exists(csv_file_path):
             return False
         
@@ -298,8 +416,39 @@ class Measure:
             )
 
 
-    def get_resume_variation(self, csv_file_path: str) -> Variation:
-        """Determine the variation where we have to resume the measurements"""
+    def get_resume_variation(self, csv_file_path: str) -> Variation | None:
+        """This method returns the variation to resume at.
+
+        It reads the last row from the CSV file and converts it into a Variation object.
+
+        Parameters
+        ----------
+        csv_file_path : str
+            The path to the CSV file
+
+        Returns
+        -------
+        Variation:
+            The variation to resume at. None if no resuming is needed.
+
+        Raises
+        -------
+        FileNotFoundError, Exception, ZeroDivisionError, ValueError, TypeError, IndexError
+
+        Examples
+        --------
+        >>> get_resume_variation("/home/user/export/LCT001/hs.csv") -> HsVariation(bri=254, hue=0, sat=0)
+
+        See Also
+        -------
+        get_variations()
+        
+        Notes
+        -------
+        This method will raise an exception when something goes wrong while reading or parsing the CSV file or when an unsupported color
+        mode is used in the CSV file.
+        """
+
         with open(csv_file_path, "r") as csv_file:
             rows = csv.reader(csv_file)
             last_row = list(rows)[-1]
@@ -332,7 +481,7 @@ class Measure:
 
             # Check if measurement is not outdated
             if measurement.updated < start_timestamp:
-                error = OutdatedMeasurementError(f"Power measurement is outdated. Aborting after {MAX_RETRIES} retries")
+                error = OutdatedMeasurementError(f"Power measurement is outdated. Aborting after {MAX_RETRIES} successive retries")
 
             # Check if we not have a 0 measurument
             if measurement.power == 0:
@@ -344,15 +493,21 @@ class Measure:
                     raise error
                 retry_count += 1
                 time.sleep(SLEEP_TIME)
-                self.take_power_measurement(start_timestamp, retry_count)
+                return self.take_power_measurement(start_timestamp, retry_count)
 
             measurements.append(measurement.power)
             if SAMPLE_COUNT > 1:
                 time.sleep(SLEEP_TIME_SAMPLE)
 
-        value = sum(measurements) / len(measurements) / self.num_lights
+        # Determine Average PM reading
+        value = sum(measurements) / len(measurements)
+
+        # Subtract Dummy Load (if present)
         if self.is_dummy_load_connected:
             value = value - self.dummy_load_value
+        
+        # Determine per load power consumption
+        value /= self.num_lights
 
         return round(value, 2)
 
@@ -371,6 +526,8 @@ class Measure:
         time.sleep(SLEEP_STANDBY)
         try:
             return self.take_power_measurement(start_time)
+        except OutdatedMeasurementError:
+            self.nudge_and_remeasure(MODE_BRIGHTNESS, Variation(0))
         except ZeroReadingError:
             _LOGGER.error("Measured 0 watt as standby usage, continuing now, but you probably need to have a look into measuring multiple lights at the same time or using a dummy load.")
             return 0

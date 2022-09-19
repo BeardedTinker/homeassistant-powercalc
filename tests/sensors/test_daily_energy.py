@@ -6,6 +6,7 @@ from homeassistant.const import (
     ATTR_DEVICE_CLASS,
     ATTR_ENTITY_ID,
     ATTR_UNIT_OF_MEASUREMENT,
+    CONF_ENTITY_ID,
     CONF_NAME,
     CONF_PLATFORM,
     CONF_UNIT_OF_MEASUREMENT,
@@ -18,6 +19,7 @@ from homeassistant.core import HomeAssistant, State
 from homeassistant.helpers.typing import ConfigType
 from homeassistant.util import dt
 from pytest_homeassistant_custom_component.common import (
+    MockConfigEntry,
     async_fire_time_changed,
     mock_restore_cache,
 )
@@ -27,10 +29,13 @@ from custom_components.powercalc.const import (
     CONF_ENERGY_SENSOR_NAMING,
     CONF_ENERGY_SENSOR_UNIT_PREFIX,
     CONF_ON_TIME,
+    CONF_SENSOR_TYPE,
     CONF_UPDATE_FREQUENCY,
     CONF_VALUE,
+    CONF_VALUE_TEMPLATE,
     DOMAIN,
     SERVICE_RESET_ENERGY,
+    SensorType,
     UnitPrefix,
 )
 from custom_components.powercalc.sensors.daily_energy import (
@@ -40,6 +45,7 @@ from custom_components.powercalc.sensors.daily_energy import (
 
 from ..common import (
     assert_entity_state,
+    create_input_boolean,
     create_input_number,
     run_powercalc_setup_yaml_config,
 )
@@ -255,6 +261,52 @@ async def test_template_value(hass: HomeAssistant):
     assert state.state == "0.0250"
 
 
+async def test_config_flow_template_value(hass: HomeAssistant):
+    """
+    Test that power sensor is correctly created when a template is used as the value
+    See https://github.com/bramstroker/homeassistant-powercalc/issues/980
+    """
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        data={
+            CONF_NAME: "My daily",
+            CONF_SENSOR_TYPE: SensorType.DAILY_ENERGY,
+            CONF_DAILY_FIXED_ENERGY: {
+                CONF_UNIT_OF_MEASUREMENT: POWER_WATT,
+                CONF_VALUE_TEMPLATE: "{{ 5*0.5 }}",
+            },
+        },
+    )
+    entry.add_to_hass(hass)
+    assert await hass.config_entries.async_setup(entry.entry_id)
+    await hass.async_block_till_done()
+
+    power_state = hass.states.get("sensor.my_daily_power")
+    assert power_state
+    assert power_state.state == "2.50"
+
+
+async def test_config_flow_decimal_value(hass: HomeAssistant):
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        data={
+            CONF_NAME: "My daily",
+            CONF_SENSOR_TYPE: SensorType.DAILY_ENERGY,
+            CONF_DAILY_FIXED_ENERGY: {
+                CONF_UNIT_OF_MEASUREMENT: POWER_WATT,
+                CONF_VALUE: 0.3,
+            },
+        },
+    )
+    entry.add_to_hass(hass)
+    assert await hass.config_entries.async_setup(entry.entry_id)
+    await hass.async_block_till_done()
+
+    power_state = hass.states.get("sensor.my_daily_power")
+    assert power_state
+    assert power_state.state == "0.30"
+
+
 async def test_reset_service(hass: HomeAssistant):
     await run_powercalc_setup_yaml_config(
         hass,
@@ -315,6 +367,30 @@ async def test_restore_state(hass: HomeAssistant):
     assert hass.states.get("sensor.my_daily_energy").state == "0.5000"
 
 
+async def test_restore_state_catches_decimal_conversion_exception(hass: HomeAssistant):
+    mock_restore_cache(
+        hass,
+        [
+            State(
+                "sensor.my_daily_energy",
+                "unknown",
+            ),
+        ],
+    )
+
+    await run_powercalc_setup_yaml_config(
+        hass,
+        {
+            CONF_NAME: "My daily",
+            CONF_DAILY_FIXED_ENERGY: {
+                CONF_VALUE: 1.5,
+            },
+        },
+    )
+
+    assert hass.states.get("sensor.my_daily_energy").state == "0.0000"
+
+
 async def test_small_update_frequency_updates_correctly(hass: HomeAssistant):
     await run_powercalc_setup_yaml_config(
         hass,
@@ -332,6 +408,23 @@ async def test_small_update_frequency_updates_correctly(hass: HomeAssistant):
 
     await _trigger_periodic_update(hass, 50)
     assert_entity_state(hass, "sensor.router_energy", "0.0100")
+
+
+async def test_name_and_entity_id_can_be_inherited_from_source_entity(
+    hass: HomeAssistant,
+):
+    await create_input_boolean(hass, "test")
+    await run_powercalc_setup_yaml_config(
+        hass,
+        {
+            CONF_ENTITY_ID: "input_boolean.test",
+            CONF_DAILY_FIXED_ENERGY: {
+                CONF_VALUE: 0.24,
+            },
+        },
+    )
+    state = hass.states.get("sensor.test_energy")
+    assert state
 
 
 async def _trigger_periodic_update(hass: HomeAssistant, number_of_updates: int = 1):

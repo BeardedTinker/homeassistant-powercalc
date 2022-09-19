@@ -1,6 +1,15 @@
+from homeassistant import config_entries
 from homeassistant.components import input_boolean, input_number, light, sensor
-from homeassistant.const import CONF_ENTITY_ID, CONF_PLATFORM
+from homeassistant.components.light import ColorMode
+from homeassistant.const import (
+    CONF_ENTITY_ID,
+    CONF_NAME,
+    CONF_PLATFORM,
+    CONF_UNIQUE_ID,
+    STATE_ON,
+)
 from homeassistant.core import HomeAssistant
+from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.typing import ConfigType, StateType
 from homeassistant.setup import async_setup_component
@@ -14,8 +23,11 @@ from custom_components.powercalc.const import (
     CONF_FIXED,
     CONF_MODE,
     CONF_POWER,
+    CONF_SENSOR_TYPE,
     DOMAIN,
+    DUMMY_ENTITY_ID,
     CalculationStrategy,
+    SensorType,
 )
 
 
@@ -25,7 +37,7 @@ async def create_mock_light_entity(
 ) -> tuple[str, str]:
     """Create a mocked light entity, and bind it to a device having a manufacturer/model"""
     entity_registry = er.async_get(hass)
-    device_registry = mock_device_registry(hass)
+    device_registry = dr.async_get(hass)
     platform: test_light_platform = getattr(hass.components, "test.light")
     platform.init(empty=True)
 
@@ -53,28 +65,47 @@ async def create_mock_light_entity(
         entity_entry = entity_registry.async_get_or_create(
             "light", "test", entity.unique_id, device_id=device_entry.id
         )
+        await hass.async_block_till_done()
 
     return (entity_entry.entity_id, device_entry.id)
+
+
+def create_discoverable_light(
+    name: str, unique_id: str = "99f899fefes"
+) -> test_light_platform.MockLight:
+    light = test_light_platform.MockLight(name, STATE_ON, unique_id)
+    light.manufacturer = "lidl"
+    light.model = "HG06106C"
+    light.supported_color_modes = [ColorMode.BRIGHTNESS]
+    light.brightness = 125
+    return light
 
 
 async def run_powercalc_setup_yaml_config(
     hass: HomeAssistant,
     sensor_config: list[ConfigType] | ConfigType,
-    domain_config: ConfigType = {},
+    domain_config: ConfigType | None = None,
 ):
-    if isinstance(sensor_config, list):
-        for entry in sensor_config:
-            if CONF_PLATFORM not in entry:
-                entry[CONF_PLATFORM] = DOMAIN
-    elif CONF_PLATFORM not in sensor_config:
-        sensor_config[CONF_PLATFORM] = DOMAIN
+    if domain_config is None:
+        domain_config = {}
 
     assert await async_setup_component(hass, DOMAIN, {DOMAIN: domain_config})
     await hass.async_block_till_done()
-    assert await async_setup_component(
-        hass, sensor.DOMAIN, {sensor.DOMAIN: sensor_config}
-    )
-    await hass.async_block_till_done()
+
+    if sensor_config:
+        if isinstance(sensor_config, list):
+            for entry in sensor_config:
+                if CONF_PLATFORM not in entry:
+                    entry[CONF_PLATFORM] = DOMAIN
+        elif CONF_PLATFORM not in sensor_config:
+            sensor_config[CONF_PLATFORM] = DOMAIN
+
+        if "sensor" in hass.config.components:
+            hass.config.components.remove("sensor")
+        assert await async_setup_component(
+            hass, sensor.DOMAIN, {sensor.DOMAIN: sensor_config}
+        )
+        await hass.async_block_till_done()
 
 
 async def create_input_boolean(hass: HomeAssistant, name: str = "test"):
@@ -103,6 +134,28 @@ def get_simple_fixed_config(entity_id: str, power: float = 50) -> ConfigType:
         CONF_MODE: CalculationStrategy.FIXED,
         CONF_FIXED: {CONF_POWER: power},
     }
+
+
+async def create_mocked_virtual_power_sensor_entry(
+    hass: HomeAssistant, name: str, unique_id: str | None
+) -> config_entries.ConfigEntry:
+    config_entry = MockConfigEntry(
+        domain=DOMAIN,
+        unique_id=unique_id,
+        data={
+            CONF_SENSOR_TYPE: SensorType.VIRTUAL_POWER,
+            CONF_UNIQUE_ID: unique_id,
+            CONF_ENTITY_ID: DUMMY_ENTITY_ID,
+            CONF_NAME: name,
+            CONF_MODE: CalculationStrategy.FIXED,
+            CONF_FIXED: {CONF_POWER: 50},
+        },
+    )
+
+    config_entry.add_to_hass(hass)
+    assert await hass.config_entries.async_setup(config_entry.entry_id)
+    await hass.async_block_till_done()
+    return config_entry
 
 
 def assert_entity_state(hass: HomeAssistant, entity_id: str, expected_state: StateType):

@@ -8,9 +8,8 @@
 [![Quality Gate Status](https://sonarcloud.io/api/project_badges/measure?project=bramstroker_homeassistant-powercalc&metric=alert_status)](https://sonarcloud.io/summary/new_code?id=bramstroker_homeassistant-powercalc)
 
 # :zap: PowerCalc: Home Assistant Virtual Power Sensors
-Custom component to calculate estimated power consumption of lights and other appliances.
-Provides easy configuration to get virtual power consumption sensors in Home Assistant for all your devices which don't have a build in power meter.
-This component estimates power usage by looking at brightness, hue/saturation and color temperature etc using different strategies. They are explained below.
+
+PowerCalc is a custom component for Home Assistant to estimate the power consumption (as virtual meters) of lights, fans and other devices, which don't have a built-in power meter. The consumption of light entities is calculated using different strategies to estimate the power usage by looking at brightness, hue/saturation and color temperature. For other entities a generic calculation can be applied, based on the attributes relevant for that entity.
 
 ![Preview](https://raw.githubusercontent.com/bramstroker/homeassistant-powercalc/master/assets/preview.gif)
 
@@ -114,6 +113,7 @@ They are as follows:
 | wled                      | object  | **Optional** | [WLED mode options](#wled-mode)                                            |
 | entities                  | list    | **Optional** | Makes it possible to add multiple entities at once in one powercalc entry. Also enable possibility to create group sensors automatically. See [multiple entities and grouping](#multiple-entities-and-grouping)  |
 | create_group              | string  | **Optional** | This setting is only applicable when you also use `entities` setting or `include`. Define a group name here. See [multiple entities and grouping](#multiple-entities-and-grouping) |
+| hide_members              | boolean | **Optional** | Hide all group members in HA GUI, only applicable when `create_group` is also defined.
 | include                   | object  | **Optional** | Use this in combination with `create_group` to automatically include entities from a certain area, group or template. See [Include entities](#dynamically-including-entities)
 | power_sensor_id           | string  | **Optional** | Entity id of an existing power sensor. This can be used to let powercalc create energy sensors and utility meters. This will create no virtual power sensor.
 | energy_sensor_id           | string  | **Optional** | Entity id of an existing energy sensor. Mostly used in conjunction with `power_sensor_id`.
@@ -140,7 +140,7 @@ All these settings are completely optional. You can skip this section if you don
 | Name                          | Type    | Requirement  | Default                | Description                                                                                                                                        |
 | ----------------------------- | ------- | ------------ | ---------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------- |
 | enable_autodiscovery          | boolean | **Optional** | true                   | Whether you want powercalc to automatically setup power sensors for supported models in your HA instance.
-| scan_interval                 | string  | **Optional** | 00:10:00               | Interval at which the sensor state is updated, even when the power value stays the same. Format HH:MM:SS                                           |
+| force_update_frequency        | string  | **Optional** | 00:10:00               | Interval at which the sensor state is updated, even when the power value stays the same. Format HH:MM:SS                                           |
 | create_energy_sensors         | boolean | **Optional** | true                   | Let the component automatically create energy sensors (kWh) for every power sensor                                                                 |
 | power_sensor_naming           | string  | **Optional** | {} power               | Change the name of the sensors. Use the `{}` placeholder for the entity name of your appliance. This will also change the entity_id of your sensor |
 | power_sensor_friendly_naming  | string  | **Optional** |                        | Change the friendly name of the sensors, Use `{}` placehorder for the original entity name. |
